@@ -18,6 +18,7 @@ class HttpError extends Error {
 const BAN_FOREVER = '876000h'; // ~100 anos
 
 export default async (req) => {
+  let adminOk = false; // detalhes técnicos só são mostrados depois de confirmar que quem chama é administrador
   try {
     if (req.method !== 'POST') throw new HttpError(405, 'Método não permitido.');
 
@@ -27,7 +28,12 @@ export default async (req) => {
     if (!url || !serviceKey) {
       throw new HttpError(500, 'Servidor sem configuração: defina SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no Netlify.');
     }
-    const sb = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    let sb;
+    try {
+      sb = createClient(url.trim(), serviceKey.trim(), { auth: { autoRefreshToken: false, persistSession: false } });
+    } catch (e) {
+      throw new HttpError(500, 'Configuração inválida na Netlify (SUPABASE_URL ou chave do Supabase): ' + String(e?.message || e).slice(0, 160));
+    }
 
     // 1) Quem está chamando? Valida o token e exige perfil de administrador ativo.
     const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
@@ -36,6 +42,7 @@ export default async (req) => {
     if (authErr || !auth?.user) throw new HttpError(401, 'Sessão inválida ou expirada. Entre novamente.');
     const { data: me } = await sb.from('profiles').select('id, role, active').eq('id', auth.user.id).maybeSingle();
     if (!me || !me.active || me.role !== 'admin') throw new HttpError(403, 'Acesso restrito a administradores.');
+    adminOk = true;
 
     let body;
     try { body = await req.json(); } catch { throw new HttpError(400, 'Requisição inválida.'); }
@@ -190,7 +197,11 @@ export default async (req) => {
   } catch (e) {
     if (e instanceof HttpError) return json(e.status, { error: e.message });
     console.error('admin-users', e);
-    return json(500, { error: 'Erro interno. Tente novamente.' });
+    return json(500, {
+      error: adminOk
+        ? 'Erro interno: ' + String(e?.message || e).slice(0, 200)
+        : 'Erro interno. Tente novamente.',
+    });
   }
 };
 
