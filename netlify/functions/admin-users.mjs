@@ -63,7 +63,14 @@ export default async (req) => {
     const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
     if (!token) throw new HttpError(401, 'Sessão ausente. Entre novamente.');
     const { data: auth, error: authErr } = await sb.auth.getUser(token);
-    if (authErr || !auth?.user) throw new HttpError(401, 'Sessão inválida ou expirada. Entre novamente.');
+    if (authErr || !auth?.user) {
+      // Distingue "chave do servidor inválida" de "sessão do usuário expirada".
+      const { error: keyErr } = await sb.from('profiles').select('id', { head: true, count: 'exact' }).limit(1);
+      if (keyErr) {
+        throw new HttpError(500, 'A chave SUPABASE_SERVICE_ROLE_KEY da Netlify não funcionou no Supabase (' + String(keyErr.message || keyErr.code || 'sem detalhe').slice(0, 120) + '). Copie a chave secret de novo, cole na Netlify e publique.');
+      }
+      throw new HttpError(401, 'Sessão inválida ou expirada (' + String(authErr?.message || 'usuário não encontrado').slice(0, 120) + '). Saia e entre novamente.');
+    }
     const { data: me, error: meErr } = await sb.from('profiles').select('id, role, active').eq('id', auth.user.id).maybeSingle();
     if (meErr) {
       throw new HttpError(500, 'A função não conseguiu ler os perfis (' + meErr.message + '). Confira SUPABASE_SERVICE_ROLE_KEY e SUPABASE_URL na Netlify.');
