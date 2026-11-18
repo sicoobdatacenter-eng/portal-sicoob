@@ -17,6 +17,10 @@ class HttpError extends Error {
 
 const BAN_FOREVER = '876000h'; // ~100 anos
 
+// O Realtime do supabase-js exige WebSocket nativo (Node 22+). Esta função nunca usa Realtime,
+// então passamos um transporte vazio para funcionar também em Node 18/20.
+class SemRealtime {}
+
 export default async (req) => {
   let adminOk = false; // detalhes técnicos só são mostrados depois de confirmar que quem chama é administrador
   try {
@@ -30,7 +34,10 @@ export default async (req) => {
     }
     let sb;
     try {
-      sb = createClient(url.trim(), serviceKey.trim(), { auth: { autoRefreshToken: false, persistSession: false } });
+      sb = createClient(url.trim(), serviceKey.trim(), {
+        auth: { autoRefreshToken: false, persistSession: false },
+        realtime: { transport: SemRealtime },
+      });
     } catch (e) {
       throw new HttpError(500, 'Configuração inválida na Netlify (SUPABASE_URL ou chave do Supabase): ' + String(e?.message || e).slice(0, 160));
     }
