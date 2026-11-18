@@ -17,6 +17,18 @@ class HttpError extends Error {
 
 const BAN_FOREVER = '876000h'; // ~100 anos
 
+// Descobre se a chave colada na Netlify é a errada (ex.: a publishable no lugar da secret/service_role).
+function keyProblem(key) {
+  if (key.startsWith('sb_publishable_')) return 'é a chave publishable';
+  if (key.startsWith('eyJ')) {
+    try {
+      const role = JSON.parse(Buffer.from(key.split('.')[1], 'base64url').toString('utf8')).role;
+      if (role !== 'service_role') return `é uma chave "${role}"`;
+    } catch { /* formato desconhecido: deixa o Supabase responder */ }
+  }
+  return null;
+}
+
 // O Realtime do supabase-js exige WebSocket nativo (Node 22+). Esta função nunca usa Realtime,
 // então passamos um transporte vazio para funcionar também em Node 18/20.
 class SemRealtime {}
@@ -26,15 +38,20 @@ export default async (req) => {
   try {
     if (req.method !== 'POST') throw new HttpError(405, 'Método não permitido.');
 
-    const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim()
+      .replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '');
+    const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
     const domain = process.env.VITE_AUTH_EMAIL_DOMAIN || process.env.AUTH_EMAIL_DOMAIN;
     if (!url || !serviceKey) {
       throw new HttpError(500, 'Servidor sem configuração: defina SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no Netlify.');
     }
+    const bad = keyProblem(serviceKey);
+    if (bad) {
+      throw new HttpError(500, `A chave em SUPABASE_SERVICE_ROLE_KEY ${bad}. Use a chave secret (sb_secret_...) ou a service_role, em Project Settings > API Keys do Supabase.`);
+    }
     let sb;
     try {
-      sb = createClient(url.trim(), serviceKey.trim(), {
+      sb = createClient(url, serviceKey, {
         auth: { autoRefreshToken: false, persistSession: false },
         realtime: { transport: SemRealtime },
       });
@@ -47,8 +64,16 @@ export default async (req) => {
     if (!token) throw new HttpError(401, 'Sessão ausente. Entre novamente.');
     const { data: auth, error: authErr } = await sb.auth.getUser(token);
     if (authErr || !auth?.user) throw new HttpError(401, 'Sessão inválida ou expirada. Entre novamente.');
-    const { data: me } = await sb.from('profiles').select('id, role, active').eq('id', auth.user.id).maybeSingle();
-    if (!me || !me.active || me.role !== 'admin') throw new HttpError(403, 'Acesso restrito a administradores.');
+    const { data: me, error: meErr } = await sb.from('profiles').select('id, role, active').eq('id', auth.user.id).maybeSingle();
+    if (meErr) {
+      throw new HttpError(500, 'A função não conseguiu ler os perfis (' + meErr.message + '). Confira SUPABASE_SERVICE_ROLE_KEY e SUPABASE_URL na Netlify.');
+    }
+    if (!me) {
+      throw new HttpError(403, `Acesso restrito a administradores. A função não encontrou o perfil do usuário ${auth.user.email} (id ${auth.user.id}) na tabela profiles.`);
+    }
+    if (!me.active || me.role !== 'admin') {
+      throw new HttpError(403, `Acesso restrito a administradores. Perfil encontrado: perfil=${me.role}, ativo=${me.active}.`);
+    }
     adminOk = true;
 
     let body;
@@ -113,14 +138,14 @@ export default async (req) => {
           if (/invalid/i.test(msg) && /email/i.test(msg)) {
             throw new HttpError(500, 'O Supabase recusou o identificador interno do login. Defina VITE_AUTH_EMAIL_DOMAIN com um domínio válido (veja o README).');
           }
-          throw new HttpError(500, 'Não foi possível criar o acesso.');
+          throw new HttpError(500, 'Não foi possível criar o acesso: ' + msg.slice(0, 160));
         }
         const { data: profile, error: pErr } = await sb.from('profiles')
           .insert({ id: created.user.id, username, full_name, role, active: true, created_by: me.id })
           .select().single();
         if (pErr) {
           await sb.auth.admin.deleteUser(created.user.id);
-          throw new HttpError(500, 'Não foi possível salvar o perfil do usuário.');
+          throw new HttpError(500, 'Não foi possível salvar o perfil do usuário: ' + String(pErr.message).slice(0, 160));
         }
         return json(201, { user: profile });
       }
